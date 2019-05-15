@@ -9,7 +9,7 @@ library(psych)
 d <- read_csv("../data/parameters.csv")
 
 ## Pairwise correlations
-d.cor <- d %>% select_if(~!any(is.na(.))) %>% select(-NHP, `Vaccine Group`) %>% select_if(is.numeric) %>% data.matrix %>% corr.test(., method="kendall", adjust="holm")
+d.cor <- d %>% select_if(~!any(is.na(.))) %>% select(-NHP, -`Vaccine Group`) %>% select_if(is.numeric) %>% data.matrix %>% corr.test(., method="kendall", adjust="holm")
 
 ## pvalues
 d.cor.pval <- d.cor$p %>% as_tibble %>% mutate(name=colnames(.)) %>% gather(variable, value, -name)
@@ -18,10 +18,10 @@ d.cor.pval <- d.cor$p %>% as_tibble %>% mutate(name=colnames(.)) %>% gather(vari
 d.cor.r <- d.cor$r %>% as_tibble %>% mutate(name=colnames(.)) %>% gather(variable, value, -name) %>% mutate(p.value = d.cor.pval$value)
 
 ## pvalues vs value of Kendall's Tau
-d.cor.r %>% filter(value >= d.cor.limit | value <= -d.cor.limit)
+d.cor.limit  <- 0.7
+d.cor.r %>% filter((value >= d.cor.limit | value <= -d.cor.limit) & p.value <=0.05 & variable!=name)
 
 mypltt<-brewer.pal(7,"RdBu")
-d.cor.limit  <- 0.8
 
 pdf("../plots/cor.pdf", w = 25, h = 20)
 d.cor.r %>% filter((p.value<=0.05 & (value >= d.cor.limit | value <= -d.cor.limit)) & (variable !=name)) %>% mutate(variable = fct_drop(variable), name=fct_drop(name)) %>% ggplot(aes(variable, name, fill=value)) + geom_tile() + geom_label(aes(label=round(value, 1))) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + scale_fill_gradientn(colors=mypltt)
@@ -64,7 +64,7 @@ d.time <- map2_dfr(time.start.points, time.end.points, function(x,y){
     }
 }) %>% as_tibble
 
-d.time %>% filter(NHP == 1) %>% select(tstart, tend, time, Time.of.death)
+d.time %>% filter(NHP == 3) %>% select(tstart, tend, time, Time.of.death)
 
 d.time  <- d.time %>% mutate(death = 
 d.time %>% select(tstart, tend, Time.of.death) %>% pmap_dbl(function(tstart, tend, Time.of.death){
@@ -81,7 +81,7 @@ d.time %>% select(tstart, tend, Time.of.death) %>% pmap_dbl(function(tstart, ten
     }
 })) %>% filter(!is.na(death))
 
-d.time %>% filter(NHP == 1) %>% select(tstart, tend, time, Time.of.death, death)
+d.time %>% filter(NHP == 2) %>% select(tstart, tend, time, Time.of.death, death)
 
 write_csv(d.time, "../data/parameters_with_time_intervals.csv")
 
@@ -113,16 +113,53 @@ zp <- cox.zph(d.cox)
 d.outcome <- d %>% mutate(outcome=ifelse(`Time of death` < 28, 1, 0))
 
 library(rstanarm)
+library(projpred)
 
 d.outcome  <- d.outcome %>% select(names(.)[str_detect(names(.), "min|max") | names(.) %in% c("Vaccine Group", "outcome")])
 
 d.outcome <- d.outcome %>% mutate_at(str_subset(names(d.outcome), "max"), scale)
 
-SEED <- 112358
-wi_prior <- normal(-1, 1)
-fit_partialpool <- 
-  stan_glmer( outcome ~ `Clinical Score max` + `max Viremia PFU (log10)` + `max Viremia RT-PCR` + `Body temperture max` + `Weight max (%)` + `Liver AST max` + `Liver ALT max` + `Liver ALB max` + `Liver ALP max` + `Kidney Creatinine max` + `Kidney BUN max` + `Body temperture min` + `Weight min (%)` + `Liver AST min` + `Liver ALT min` + `Liver ALB min` + `Liver ALP min` + `Kidney Creatinine min` + `Kidney BUN min`  + (1 | `Vaccine Group`), data = d.outcome, 
-             family = binomial("logit"),
-             prior_intercept = wi_prior, seed = SEED)
+d.outcome %>% select_if(~!any(is.na(.))) %>% select(-`Vaccine Group`) %>% select_if(is.numeric) %>% data.matrix %>% corr.test(., method="kendall", adjust="holm")
 
-thetas.partialpool <- plogis(fit_partialpool)
+## Define prior
+SEED <- 112358
+fit_partialpool <- 
+  stan_glm( outcome ~ `Clinical Score max` + `max Viremia PFU (log10)` + `max Viremia RT-PCR` + `Body temperture max` + `Weight max (%)` + `Liver AST max` + `Liver ALT max` + `Liver ALB max` + `Liver ALP max` + `Kidney Creatinine max` + `Kidney BUN max` + `Body temperture min` + `Weight min (%)` + `Liver AST min` + `Liver ALT min` + `Liver ALB min` + `Liver ALP min` + `Kidney Creatinine min` + `Kidney BUN min`, data = d.outcome, 
+             family = binomial("logit"), seed = SEED, iter=6000, warmup=500, chains=4)
+
+plot(fit_partialpool)
+
+launch_shinystan(fit_partialpool)
+
+posterior_vs_prior(fit_partialpool)
+
+## Random Forest
+
+d.outcome <- d.outcome %>% mutate(
+                  outcome = as.factor(d.outcome$outcome)
+                  )
+levels(d.outcome$outcome) <- c("alive","dead")
+
+library(randomForest)
+library(caret)
+
+rfControl <- trainControl(
+  method = "repeatedcv",
+  number = 10,
+  repeats= 10,
+  verboseIter = FALSE,
+  returnData = FALSE,
+  allowParallel = TRUE,
+  summaryFunction = twoClassSummary,
+  classProbs = TRUE,
+  savePredictions = T,
+  search="grid"
+)
+set.seed(11258)
+mtry <- sqrt(21)
+rf_random <- train(outcome ~ ., data=data.frame(d.outcome), method="rf", tuneLength=15, trControl=rfControl)
+print(rf_random)
+plot(rf_random)
+
+v <- varImp(rf_random$finalModel)
+tibble(gini=v, feature=rownames(v)) %>% ggplot(aes(x=reorder(feature, gini$Overall), y=gini$Overall)) + geom_col() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
