@@ -6,7 +6,31 @@ library(RColorBrewer)
 
 library(psych)
 
-d <- read_csv("../data/parameters.csv")
+d <- read_csv("../data/parameters_v3.csv")
+
+## Polyfunctionality
+polyfunc.cols <- colnames(d) %>% str_subset(., "ADNKD|ADCP|ADNP|ADCD")
+polyfunc.clustersize  <- c(1,2,3,4,5,6)
+
+set.seed(11258)
+polyfunc.withinss  <- polyfunc.clustersize %>% map_dbl(function(x){
+    k <- d %>% select(polyfunc.cols) %>% kmeans(., x, nstart = 20)
+    k$tot.withinss
+})
+
+plot(polyfunc.withinss)
+
+polyfunc.kmeans <- d %>% select(polyfunc.cols) %>% kmeans(., 3, nstart = 20)
+
+polyfunc.pca <- d %>% select(polyfunc.cols) %>% prcomp(., center = TRUE, scale. = TRUE)
+polyfunc.pcadf <- data.frame(polyfunc.pca$x[,"PC1"], polyfunc.pca$x[,"PC2"], d$Survival, d$`Time of death`, polyfunc.kmeans$cluster)
+colnames(polyfunc.pcadf) <- c("PC1", "PC2", "Survival", "Time of death", "cluster")
+polyfunc.pcadf <- polyfunc.pcadf %>% mutate(cluster=as.factor(cluster))
+
+
+pdf("ief_clustering.pdf")
+ggplot(polyfunc.pcadf, aes(PC1, PC2, color=cluster, shape=Survival)) + geom_point()
+dev.off()
 
 ## Pairwise correlations
 d.cor <- d %>% select_if(~!any(is.na(.))) %>% select(-NHP, -`Vaccine Group`) %>% select_if(is.numeric) %>% data.matrix %>% corr.test(., method="kendall", adjust="holm")
@@ -16,6 +40,7 @@ d.cor.pval <- d.cor$p %>% as_tibble %>% mutate(name=colnames(.)) %>% gather(vari
 
 ## Kendall's tau value
 d.cor.r <- d.cor$r %>% as_tibble %>% mutate(name=colnames(.)) %>% gather(variable, value, -name) %>% mutate(p.value = d.cor.pval$value)
+d.cor.r %>% filter(name %in% polyfunc.cols & variable %in% polyfunc.cols & name != variable) %>% arrange(-desc(value))
 
 ## pvalues vs value of Kendall's Tau
 d.cor.limit  <- 0.7
@@ -127,7 +152,9 @@ fit_partialpool <-
   stan_glm( outcome ~ `Clinical Score max` + `max Viremia PFU (log10)` + `max Viremia RT-PCR` + `Body temperture max` + `Weight max (%)` + `Liver AST max` + `Liver ALT max` + `Liver ALB max` + `Liver ALP max` + `Kidney Creatinine max` + `Kidney BUN max` + `Body temperture min` + `Weight min (%)` + `Liver AST min` + `Liver ALT min` + `Liver ALB min` + `Liver ALP min` + `Kidney Creatinine min` + `Kidney BUN min`, data = d.outcome, 
              family = binomial("logit"), seed = SEED, iter=6000, warmup=500, chains=4)
 
+pdf("../plots/GLM.pdf")
 plot(fit_partialpool)
+dev.off()
 
 launch_shinystan(fit_partialpool)
 
@@ -161,5 +188,7 @@ rf_random <- train(outcome ~ ., data=data.frame(d.outcome), method="rf", tuneLen
 print(rf_random)
 plot(rf_random)
 
+pdf("../plots/var_imp.pdf")
 v <- varImp(rf_random$finalModel)
 tibble(gini=v, feature=rownames(v)) %>% ggplot(aes(x=reorder(feature, gini$Overall), y=gini$Overall)) + geom_col() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+dev.off()
