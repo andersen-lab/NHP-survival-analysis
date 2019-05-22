@@ -5,6 +5,9 @@ library(ggplot2)
 library(RColorBrewer)
 
 library(psych)
+library(Rtsne)
+
+mypltt<-brewer.pal(7,"RdBu")
 
 d <- read_csv("../data/parameters_v3.csv")
 
@@ -27,10 +30,25 @@ polyfunc.pcadf <- data.frame(polyfunc.pca$x[,"PC1"], polyfunc.pca$x[,"PC2"], d$S
 colnames(polyfunc.pcadf) <- c("PC1", "PC2", "Survival", "Time of death", "cluster")
 polyfunc.pcadf <- polyfunc.pcadf %>% mutate(cluster=as.factor(cluster))
 
-
-pdf("ief_clustering.pdf")
+pdf("../plots/ief_clustering.pdf")
 ggplot(polyfunc.pcadf, aes(PC1, PC2, color=cluster, shape=Survival)) + geom_point()
 dev.off()
+
+polyfunc.tsne <- d %>% select(polyfunc.cols) %>% Rtsne(perplexity=5)
+polyfunc.tsnedf <- data.frame(polyfunc.tsne$Y[,1], polyfunc.tsne$Y[,2], d$Survival, d$`Time of death`, polyfunc.kmeans$cluster)
+colnames(polyfunc.tsnedf) <- c("comp1", "comp2", "Survival", "Time of death", "cluster")
+polyfunc.tsnedf <- polyfunc.tsnedf %>% mutate(cluster=as.factor(cluster))
+
+pdf("../plots/ief_clustering_tsne.pdf")
+ggplot(polyfunc.tsnedf, aes(comp1, comp2, color=cluster, shape=Survival)) + geom_point()
+dev.off()
+
+## Cluster differences
+
+d.cluster <- d %>% mutate(cluster = as.factor(polyfunc.kmeans$cluster)) %>% select(c(polyfunc.cols, "cluster"))
+
+d.cluster.pval <- d.cluster %>% select(polyfunc.cols) %>% names(.) %>% map(~kruskal.test(get(.) ~ d.cluster$cluster, data=d.cluster)$p.value)
+tibble(name=polyfunc.cols, pval=p.adjust(d.cluster.pval)) %>% filter(pval <= 0.05)
 
 ## Pairwise correlations
 d.cor <- d %>% select_if(~!any(is.na(.))) %>% select(-NHP, -`Vaccine Group`) %>% select_if(is.numeric) %>% data.matrix %>% corr.test(., method="kendall", adjust="holm")
@@ -45,8 +63,6 @@ d.cor.r %>% filter(name %in% polyfunc.cols & variable %in% polyfunc.cols & name 
 ## pvalues vs value of Kendall's Tau
 d.cor.limit  <- 0.7
 d.cor.r %>% filter((value >= d.cor.limit | value <= -d.cor.limit) & p.value <=0.05 & variable!=name)
-
-mypltt<-brewer.pal(7,"RdBu")
 
 pdf("../plots/cor.pdf", w = 25, h = 20)
 d.cor.r %>% filter((p.value<=0.05 & (value >= d.cor.limit | value <= -d.cor.limit)) & (variable !=name)) %>% mutate(variable = fct_drop(variable), name=fct_drop(name)) %>% ggplot(aes(variable, name, fill=value)) + geom_tile() + geom_label(aes(label=round(value, 1))) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + scale_fill_gradientn(colors=mypltt)
@@ -119,11 +135,11 @@ d.time$Group <- as.factor(d.time$Vaccine.Group)
 levels(d.time$Group) <- c(1:6)
 
 fit <- survfit(Surv(tstart, tend, death == 1) ~ Group, data = d.time)
-png("../plots/surv.png")
+pdf("../plots/surv.pdf")
 ggsurvplot(fit, data = d.time, censor.shape="x", censor.size = 4, risk.table=TRUE, ncensor.plot=TRUE)
 dev.off()
 
-d.cox <- coxph(Surv(tstart, tend, death) ~ cluster(NHP) + strata(Vaccine.Group) + (Body.temperture + Kidney.BUN  + Kidney.Creatinine + Liver.ALB  + Liver.ALP  + Liver.ALT + Liver.AST + Weight), d.time)
+d.cox <- coxph(Surv(tstart, tend, death) ~ strata(Vaccine.Group) + (Body.temperture + Kidney.BUN  + Kidney.Creatinine + Liver.ALB  + Liver.ALP  + Liver.ALT + Liver.AST + Weight), d.time)
 
 zp <- cox.zph(d.cox)
 
@@ -134,27 +150,52 @@ zp <- cox.zph(d.cox)
 ## Outcome analysis ##
 ######################
 
+library(rstanarm)
+options(mc.cores = parallel::detectCores())
+library(projpred)
+library(caret)
+
+zero.var <- d %>% select_if(is.numeric) %>% nearZeroVar(., names=TRUE)
+fixed.vars <- names(d)[!str_detect(names(d), "d0|d3|d6|d9|d12|d15|d22|d28|min|max")]
+
 ## Select only values that are not measured over time
 d.outcome <- d %>% mutate(outcome=ifelse(`Time of death` < 28, 1, 0))
+d.outcome  <- d.outcome %>% select(names(.)[(str_detect(names(.), "min|max") | names(.) %in% fixed.vars) & (!names(.) %in% zero.var )])
 
-library(rstanarm)
-library(projpred)
+## Scale features
+d.outcome <- d.outcome %>% mutate_if(is.numeric, scale)
 
-d.outcome  <- d.outcome %>% select(names(.)[str_detect(names(.), "min|max") | names(.) %in% c("Vaccine Group", "outcome")])
+## Identify correlations
+d.cor <- d.outcome %>% select_if(~!any(is.na(.))) %>% select(-`Vaccine Group`) %>% select_if(is.numeric) %>% data.matrix %>% corr.test(., method="kendall", adjust="holm")
 
-d.outcome <- d.outcome %>% mutate_at(str_subset(names(d.outcome), "max"), scale)
+## pvalues
+d.cor.pval <- d.cor$p %>% as_tibble %>% mutate(name=colnames(.)) %>% gather(variable, value, -name)
 
-d.outcome %>% select_if(~!any(is.na(.))) %>% select(-`Vaccine Group`) %>% select_if(is.numeric) %>% data.matrix %>% corr.test(., method="kendall", adjust="holm")
+## Kendall's tau value
+d.cor.r <- d.cor$r %>% as_tibble %>% mutate(name=colnames(.)) %>% gather(variable, value, -name) %>% mutate(p.value = d.cor.pval$value)
+
+d.cor.limit <- 0.7
+
+d.cor.r %>% filter((p.value<=0.05 & (value >= d.cor.limit | value <= -d.cor.limit)) & (variable !=name)) %>% mutate(variable = fct_drop(variable), name=fct_drop(name)) %>% ggplot(aes(variable, name, fill=value)) + geom_tile() + geom_label(aes(label=round(value, 1))) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + scale_fill_gradientn(colors=mypltt)
 
 ## Define prior
 SEED <- 112358
-fit_partialpool <- 
-  stan_glm( outcome ~ `Clinical Score max` + `max Viremia PFU (log10)` + `max Viremia RT-PCR` + `Body temperture max` + `Weight max (%)` + `Liver AST max` + `Liver ALT max` + `Liver ALB max` + `Liver ALP max` + `Kidney Creatinine max` + `Kidney BUN max` + `Body temperture min` + `Weight min (%)` + `Liver AST min` + `Liver ALT min` + `Liver ALB min` + `Liver ALP min` + `Kidney Creatinine min` + `Kidney BUN min`, data = d.outcome, 
-             family = binomial("logit"), seed = SEED, iter=6000, warmup=500, chains=4)
+fit_partialpool <- stan_glmer( outcome ~ (1 + `Clinical Score max` + `max Viremia PFU (log10)` + `max Viremia RT-PCR` + `Body temperture max` + `Weight max (%)` + `Liver AST max` + `Liver ALT max` + `Liver ALB max` + `Liver ALP max` + `Kidney Creatinine max` + `Kidney BUN max` + `Body temperture min` + `Weight min (%)` + `Liver AST min` + `Liver ALT min` + `Liver ALB min` + `Liver ALP min` + `Kidney Creatinine min` + `Kidney BUN min` |`Vaccine Group`), data = d.outcome, family = binomial("logit"), seed = SEED, iter=6000, warmup=500, chains=4)
 
 pdf("../plots/GLM.pdf")
 plot(fit_partialpool)
 dev.off()
+
+loo(fit_partialpool)
+
+draws <- as.matrix(fit_partialpool)
+alphas  <- sweep(draws[,-1], 1, draws[,1],"+")
+
+partialpool <- summary_stats(alphas)
+
+
+partialpool <- partialpool[-nrow(partialpool),]
+
 
 launch_shinystan(fit_partialpool)
 
@@ -168,7 +209,6 @@ d.outcome <- d.outcome %>% mutate(
 levels(d.outcome$outcome) <- c("alive","dead")
 
 library(randomForest)
-library(caret)
 
 rfControl <- trainControl(
   method = "repeatedcv",
