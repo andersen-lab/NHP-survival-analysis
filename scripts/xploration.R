@@ -23,7 +23,7 @@ polyfunc.withinss  <- polyfunc.clustersize %>% map_dbl(function(x){
 
 plot(polyfunc.withinss)
 
-polyfunc.kmeans <- d %>% select(polyfunc.cols) %>% kmeans(., 3, nstart = 20)
+polyfunc.kmeans <- d %>% select(polyfunc.cols) %>% kmeans(., 4, nstart = 20)
 
 polyfunc.pca <- d %>% select(polyfunc.cols) %>% prcomp(., center = TRUE, scale. = TRUE)
 polyfunc.pcadf <- data.frame(polyfunc.pca$x[,"PC1"], polyfunc.pca$x[,"PC2"], d$Survival, d$`Time of death`, polyfunc.kmeans$cluster)
@@ -34,13 +34,14 @@ pdf("../plots/ief_clustering.pdf")
 ggplot(polyfunc.pcadf, aes(PC1, PC2, color=cluster, shape=Survival)) + geom_point()
 dev.off()
 
+set.seed(112358)
 polyfunc.tsne <- d %>% select(polyfunc.cols) %>% Rtsne(perplexity=5)
-polyfunc.tsnedf <- data.frame(polyfunc.tsne$Y[,1], polyfunc.tsne$Y[,2], d$Survival, d$`Time of death`, polyfunc.kmeans$cluster)
-colnames(polyfunc.tsnedf) <- c("comp1", "comp2", "Survival", "Time of death", "cluster")
+polyfunc.tsnedf <- data.frame(polyfunc.tsne$Y[,1], polyfunc.tsne$Y[,2], d$Survival, d$`Time of death`, polyfunc.kmeans$cluster, d$`Vaccine Group`)
+colnames(polyfunc.tsnedf) <- c("comp1", "comp2", "Survival", "Time of death", "cluster", "Vaccine Group")
 polyfunc.tsnedf <- polyfunc.tsnedf %>% mutate(cluster=as.factor(cluster))
 
 pdf("../plots/ief_clustering_tsne.pdf")
-ggplot(polyfunc.tsnedf, aes(comp1, comp2, color=cluster, shape=Survival)) + geom_point()
+ggplot(polyfunc.tsnedf, aes(comp1, comp2)) + geom_point(aes(color=cluster, shape=Survival), size=5) + geom_text(aes(label=`Vaccine Group`), hjust=0,vjust=1)
 dev.off()
 
 ## Cluster differences
@@ -156,17 +157,18 @@ library(projpred)
 library(caret)
 
 zero.var <- d %>% select_if(is.numeric) %>% nearZeroVar(., names=TRUE)
-fixed.vars <- names(d)[!str_detect(names(d), "d0|d3|d6|d9|d12|d15|d22|d28|min|max")]
+fixed.vars <- names(d)[!str_detect(names(d), "d0|d3|d6|d9|d12|d15|d22|d28|min|max|outcome")]
 
 ## Select only values that are not measured over time
-d.outcome <- d %>% mutate(outcome=ifelse(`Time of death` < 28, 1, 0))
-d.outcome  <- d.outcome %>% select(names(.)[(str_detect(names(.), "min|max") | names(.) %in% fixed.vars) & (!names(.) %in% zero.var )])
+d.outcome  <- d %>% select(names(.)[(str_detect(names(.), "min|max") | names(.) %in% fixed.vars) & (!names(.) %in% zero.var )])
 
 ## Scale features
 d.outcome <- d.outcome %>% mutate_if(is.numeric, scale)
 
+d.outcome <- d.outcome %>% mutate(outcome=ifelse(d$`Time of death` < 28, 1, 0))
+
 ## Identify correlations
-d.cor <- d.outcome %>% select_if(~!any(is.na(.))) %>% select(-`Vaccine Group`) %>% select_if(is.numeric) %>% data.matrix %>% corr.test(., method="kendall", adjust="holm")
+d.cor <- d.outcome %>% select_if(~!any(is.na(.))) %>% select(-`Vaccine Group`) %>% select(str_subset(names(.), "min|max")) %>% select_if(is.numeric) %>% data.matrix %>% corr.test(., method="kendall", adjust="holm")
 
 ## pvalues
 d.cor.pval <- d.cor$p %>% as_tibble %>% mutate(name=colnames(.)) %>% gather(variable, value, -name)
@@ -182,11 +184,18 @@ d.cor.r %>% filter((p.value<=0.05 & (value >= d.cor.limit | value <= -d.cor.limi
 SEED <- 112358
 fit_partialpool <- stan_glmer( outcome ~ (1 + `Clinical Score max` + `max Viremia PFU (log10)` + `max Viremia RT-PCR` + `Body temperture max` + `Weight max (%)` + `Liver AST max` + `Liver ALT max` + `Liver ALB max` + `Liver ALP max` + `Kidney Creatinine max` + `Kidney BUN max` + `Body temperture min` + `Weight min (%)` + `Liver AST min` + `Liver ALT min` + `Liver ALB min` + `Liver ALP min` + `Kidney Creatinine min` + `Kidney BUN min` |`Vaccine Group`), data = d.outcome, family = binomial("logit"), seed = SEED, iter=6000, warmup=500, chains=4)
 
+fit_nopool <- stan_glm( outcome ~ `Clinical Score max` + `max Viremia PFU (log10)` + `max Viremia RT-PCR` + `Body temperture max` + `Weight max (%)` + `Liver AST max` + `Liver ALT max` + `Liver ALB max` + `Liver ALP max` + `Kidney Creatinine max` + `Kidney BUN max` + `Body temperture min` + `Weight min (%)` + `Liver AST min` + `Liver ALT min` + `Liver ALB min` + `Liver ALP min` + `Kidney Creatinine min` + `Kidney BUN min` , data = d.outcome, family = binomial("logit"), seed = SEED, iter=6000, warmup=500, chains=4)
+
 pdf("../plots/GLM.pdf")
-plot(fit_partialpool)
+## plot(fit_nopool)
+tibble(Feature=names(fit_nopool$coefficients), Coefficient=fit_nopool$coefficients) %>% ggplot(aes(reorder(Feature, abs(Coefficient)), Coefficient)) + geom_col() + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + xlab("Feature") + ylab("Coefficient") + coord_flip()
 dev.off()
 
 loo(fit_partialpool)
+val <- kfold(fit_partialpool, K=5)
+val2 <- kfold(fit_nopool, K=5)
+
+compare_models(val, val2)
 
 draws <- as.matrix(fit_partialpool)
 alphas  <- sweep(draws[,-1], 1, draws[,1],"+")
@@ -197,7 +206,7 @@ partialpool <- summary_stats(alphas)
 partialpool <- partialpool[-nrow(partialpool),]
 
 
-launch_shinystan(fit_partialpool)
+launch_shinystan(fit_partialpool, host="0.0.0.0", port=3389)
 
 posterior_vs_prior(fit_partialpool)
 
@@ -208,7 +217,15 @@ d.outcome <- d.outcome %>% mutate(
                   )
 levels(d.outcome$outcome) <- c("alive","dead")
 
+exo.var2 <- names(d.outcome)[!str_detect(names(d.outcome), "Survival|NHP|Vaccine Group|Time of death")]
+
+d.outcome  <- d.outcome[-c(21,22),c(exo.var2, "outcome")]
+
 library(randomForest)
+library(doParallel)
+
+cl <- makePSOCKcluster(20)
+registerDoParallel(cl)
 
 rfControl <- trainControl(
   method = "repeatedcv",
@@ -223,12 +240,14 @@ rfControl <- trainControl(
   search="grid"
 )
 set.seed(11258)
-mtry <- sqrt(21)
-rf_random <- train(outcome ~ ., data=data.frame(d.outcome), method="rf", tuneLength=15, trControl=rfControl)
+mtry <- as.integer(sqrt(145))
+rf_random <- train(outcome ~ ., data=data.frame(d.outcome), method="rf", trControl=rfControl)
 print(rf_random)
 plot(rf_random)
 
-pdf("../plots/var_imp.pdf")
+pdf("../plots/var_imp.pdf", w=6)
 v <- varImp(rf_random$finalModel)
-tibble(gini=v, feature=rownames(v)) %>% ggplot(aes(x=reorder(feature, gini$Overall), y=gini$Overall)) + geom_col() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+tibble(gini=v$Overall, feature=rownames(v)) %>% filter(gini!=0) %>% arrange(desc(gini)) %>% slice(1:20) %>% ggplot(aes(x=reorder(feature, gini), y=gini)) + geom_col() + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + xlab("Feature") + ylab("Mean decrease Gini")
 dev.off()
+
+stopCluster(cl)
