@@ -229,7 +229,7 @@ rf_random <- train(outcome ~ ., data=d.subset, method="rf", tuneLength=15, trCon
 print(rf_random)
 plot(rf_random)
 
-pdf("../plots/var_imp.pdf", w=6)
+pdf("../plots/var_imp.pdf", h=30)
 v <- varImp(rf_random$finalModel)
 tibble(gini=v, feature=rownames(v)) %>% ggplot(aes(x=reorder(feature, gini$Overall), y=gini$Overall)) + geom_col() + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + coord_flip()
 dev.off()
