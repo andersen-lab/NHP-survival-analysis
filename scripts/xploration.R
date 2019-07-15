@@ -195,7 +195,7 @@ d <- d %>% mutate(
 levels(d$outcome) <- c("alive","dead")
 
 library(doMC)
-registerDoMC(cores = 16)
+registerDoMC(cores = 8)
 library(caret)
 library(randomForest)
 library(doParallel)
@@ -224,17 +224,18 @@ rfControl <- trainControl(
 )
 set.seed(11258)
 
-mtry <- sqrt(21)
+mtry <- sqrt(114)
 rf_random <- train(outcome ~ ., data=d.subset, method="rf", tuneLength=15, trControl=rfControl)
 print(rf_random)
 plot(rf_random)
 
 pdf("../plots/var_imp.pdf", h=30)
-v <- varImp(rf_random$finalModel)
-tibble(gini=v, feature=rownames(v)) %>% ggplot(aes(x=reorder(feature, gini$Overall), y=gini$Overall)) + geom_col() + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + coord_flip()
+v <- data.frame(varImp(rf_random$finalModel))
+v <- tibble(Gini.Importance = v$Overall, names = rownames(v)) %>% filter(Gini.Importance != 0)
+v %>% ggplot(aes(x=reorder(names, Gini.Importance), y=Gini.Importance)) + geom_col() + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + coord_flip()
 dev.off()
 
-predRf <- rf_random$pred[rf_random$pred$mtry == 2,]
+predRf <- rf_random$pred[rf_random$pred$mtry == as.integer(rf_random$finalModel$tuneValue ),]
 
 getRocCV <- function(pred){
     temp.obs <- c()
