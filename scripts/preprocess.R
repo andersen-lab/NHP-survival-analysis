@@ -111,6 +111,13 @@ coef(reg_fit_cox)[which(coef(reg_fit_cox) != 0)]
 ## Checking confidence intervals
 confint(reg_fit_cox, names(coef(reg_fit_cox)[which(coef(reg_fit_cox) != 0)]), overrideNoRegularization = TRUE)
 
+bar_fit_Lr <- fitCyclopsModel(cyclopsDataCox,
+                               prior = BrokenAdaptiveRidge::createBarPrior(
+                                 penalty = "bic", initialRidgeVariance = 1000, fitBestSubset = TRUE),
+                               forceNewObject = TRUE)
+coef(bar_fit_Lr)[which(coef(bar_fit_Lr) != 0)]
+
+
 
 ## LR models
 all_lr_formula <- as.formula(paste("Survival ~", paste0(
